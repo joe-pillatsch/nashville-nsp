@@ -4,7 +4,6 @@ import type { Server } from "http";
 import { storage } from "./storage";
 import { insertDesignSchema } from "@shared/schema";
 import { openai } from "./replit_integrations/image/client";
-import { toFile } from "openai";
 import { z } from "zod";
 import multer from "multer";
 import path from "path";
@@ -260,41 +259,16 @@ Guidelines:
     const panelSet = PANEL_SETS[panelSetKey];
     console.log(`[ProcessDesign] Using ${panelSet.name} with exactly ${analysis.panelCount} panels`);
 
-    // Step 2: Create square 1024x1024 images for gpt-image-1 edit
-    // Letterbox the original image to preserve aspect ratio within the square
-    const targetSize = 1024;
-    const aspectRatio = origWidth / origHeight;
-    
-    let innerWidth: number, innerHeight: number, offsetX: number, offsetY: number;
-    if (aspectRatio > 1) {
-      // Landscape: fit width, pad top/bottom
-      innerWidth = targetSize;
-      innerHeight = Math.round(targetSize / aspectRatio);
-      offsetX = 0;
-      offsetY = Math.round((targetSize - innerHeight) / 2);
-    } else {
-      // Portrait or square: fit height, pad left/right
-      innerHeight = targetSize;
-      innerWidth = Math.round(targetSize * aspectRatio);
-      offsetX = Math.round((targetSize - innerWidth) / 2);
-      offsetY = 0;
-    }
-
-    console.log(`[ProcessDesign] Letterboxing: ${innerWidth}x${innerHeight} at offset (${offsetX}, ${offsetY})`);
-
-    // Validate panels against wall bounds and create mask
-    // Clamp panels to stay within wall bounds
+    // Validate panels against wall bounds
     const wallBounds = analysis.wallBounds || { x: 10, y: 10, width: 80, height: 80 };
     const validatedPanels: PanelPosition[] = [];
     
     for (const panel of analysis.panels) {
-      // Check if panel center is within wall bounds
       const wallLeft = wallBounds.x;
       const wallRight = wallBounds.x + wallBounds.width;
       const wallTop = wallBounds.y;
       const wallBottom = wallBounds.y + wallBounds.height;
       
-      // Clamp panel position to wall bounds
       const clampedX = Math.max(wallLeft + panel.width/2, Math.min(wallRight - panel.width/2, panel.x));
       const clampedY = Math.max(wallTop + panel.height/2, Math.min(wallBottom - panel.height/2, panel.y));
       
@@ -306,7 +280,6 @@ Guidelines:
       });
     }
     
-    // If we lost too many panels, use default layout
     if (validatedPanels.length < analysis.panelCount) {
       console.log(`[ProcessDesign] Only ${validatedPanels.length} valid panels, using default layout`);
       const defaultLayout = createDefaultLayout(analysis.panelCount);
@@ -314,214 +287,170 @@ Guidelines:
       validatedPanels.push(...defaultLayout.panels);
     }
     
-    // Create mask with panel rectangles
-    const maskComposites: sharp.OverlayOptions[] = [];
+    analysis.panels = validatedPanels;
+    console.log(`[ProcessDesign] Creating ${analysis.panels.length} programmatic panels with shadows`);
+
+    // Step 2: Create panel overlays with shadows programmatically
+    // Determine shadow offset based on lighting direction
+    const lightDir = analysis.lightingDirection || "above";
+    let shadowOffsetX = 0;
+    let shadowOffsetY = 4; // Default: light from above, shadow below
     
-    for (const panel of validatedPanels) {
-      // Scale panel dimensions to the inner (letterboxed) area
-      const panelW = Math.round((panel.width / 100) * innerWidth);
-      const panelH = Math.round((panel.height / 100) * innerHeight);
-      // Position relative to inner area, then add offset for letterboxing
-      const panelX = offsetX + Math.round((panel.x / 100) * innerWidth - panelW / 2);
-      const panelY = offsetY + Math.round((panel.y / 100) * innerHeight - panelH / 2);
+    if (lightDir === "left") {
+      shadowOffsetX = 4;
+      shadowOffsetY = 2;
+    } else if (lightDir === "right") {
+      shadowOffsetX = -4;
+      shadowOffsetY = 2;
+    } else if (lightDir === "diffuse") {
+      shadowOffsetX = 2;
+      shadowOffsetY = 2;
+    }
+
+    const panelOverlays: sharp.OverlayOptions[] = [];
+    
+    // Panel colors - dark charcoal/black for acoustic panels
+    const panelColors = [
+      { r: 35, g: 35, b: 40 },   // Near black
+      { r: 45, g: 42, b: 48 },   // Dark charcoal
+      { r: 30, g: 32, b: 35 },   // Deep gray
+      { r: 50, g: 48, b: 52 },   // Charcoal
+      { r: 38, g: 36, b: 42 },   // Dark slate
+    ];
+    
+    for (let i = 0; i < analysis.panels.length; i++) {
+      const panel = analysis.panels[i];
       
-      // Skip if panel would be outside canvas (shouldn't happen after validation)
-      if (panelX < 0 || panelY < 0 || panelX + panelW > targetSize || panelY + panelH > targetSize) {
-        console.log(`[ProcessDesign] Skipping out-of-bounds panel at (${panelX}, ${panelY})`);
+      // Calculate panel dimensions in pixels
+      let panelW = Math.round((panel.width / 100) * origWidth);
+      let panelH = Math.round((panel.height / 100) * origHeight);
+      let panelX = Math.round((panel.x / 100) * origWidth - panelW / 2);
+      let panelY = Math.round((panel.y / 100) * origHeight - panelH / 2);
+      
+      // Clamp panel to stay within image bounds (instead of skipping)
+      if (panelX < 0) {
+        panelW += panelX;
+        panelX = 0;
+      }
+      if (panelY < 0) {
+        panelH += panelY;
+        panelY = 0;
+      }
+      if (panelX + panelW > origWidth) {
+        panelW = origWidth - panelX;
+      }
+      if (panelY + panelH > origHeight) {
+        panelH = origHeight - panelY;
+      }
+      
+      // Skip if panel is too small after clamping
+      if (panelW < 10 || panelH < 10) {
+        console.log(`[ProcessDesign] Skipping too-small panel (${panelW}x${panelH})`);
         continue;
       }
       
-      // White rectangle for this panel position
-      const rectBuffer = await sharp({
+      // Scale shadow offset based on image size
+      const scaleFactor = Math.min(origWidth, origHeight) / 1000;
+      const scaledShadowX = Math.round(shadowOffsetX * scaleFactor * 2);
+      const scaledShadowY = Math.round(shadowOffsetY * scaleFactor * 2);
+      const shadowBlur = Math.max(3, Math.round(6 * scaleFactor));
+      
+      // Calculate shadow position
+      let shadowX = panelX + scaledShadowX;
+      let shadowY = panelY + scaledShadowY;
+      let shadowW = panelW + shadowBlur;
+      let shadowH = panelH + shadowBlur;
+      
+      // Clamp shadow to image bounds
+      if (shadowX < 0) {
+        shadowW += shadowX;
+        shadowX = 0;
+      }
+      if (shadowY < 0) {
+        shadowH += shadowY;
+        shadowY = 0;
+      }
+      if (shadowX + shadowW > origWidth) {
+        shadowW = origWidth - shadowX;
+      }
+      if (shadowY + shadowH > origHeight) {
+        shadowH = origHeight - shadowY;
+      }
+      
+      // Create shadow if still valid size
+      if (shadowW > 5 && shadowH > 5) {
+        const shadowBuffer = await sharp({
+          create: {
+            width: shadowW,
+            height: shadowH,
+            channels: 4,
+            background: { r: 0, g: 0, b: 0, alpha: 60 }
+          }
+        })
+          .blur(Math.max(1, Math.round(shadowBlur / 2)))
+          .png()
+          .toBuffer();
+        
+        panelOverlays.push({
+          input: shadowBuffer,
+          left: shadowX,
+          top: shadowY,
+          blend: "over" as const,
+        });
+      }
+      
+      // Select panel color (cycle through colors for variety)
+      const color = panelColors[i % panelColors.length];
+      
+      // Create the main panel rectangle with slight 3D depth effect
+      // We'll create a subtle gradient by making a slightly lighter top edge
+      const panelBuffer = await sharp({
         create: {
-          width: Math.max(1, panelW),
-          height: Math.max(1, panelH),
+          width: panelW,
+          height: panelH,
           channels: 4,
-          background: { r: 255, g: 255, b: 255, alpha: 255 }
+          background: { r: color.r, g: color.g, b: color.b, alpha: 255 }
         }
       }).png().toBuffer();
-
-      maskComposites.push({
-        input: rectBuffer,
+      
+      // Create a subtle highlight for the top edge (3D effect)
+      const highlightHeight = Math.max(2, Math.round(panelH * 0.03));
+      const highlightBuffer = await sharp({
+        create: {
+          width: panelW,
+          height: highlightHeight,
+          channels: 4,
+          background: { r: Math.min(255, color.r + 25), g: Math.min(255, color.g + 25), b: Math.min(255, color.b + 25), alpha: 255 }
+        }
+      }).png().toBuffer();
+      
+      // Create panel with highlight composited on top
+      const panelWithHighlight = await sharp(panelBuffer)
+        .composite([{ input: highlightBuffer, left: 0, top: 0 }])
+        .png()
+        .toBuffer();
+      
+      // Add subtle felt texture effect by adding slight noise variation
+      // (Sharp doesn't have built-in noise, but we can add a slight modulation)
+      const finalPanel = await sharp(panelWithHighlight)
+        .modulate({ brightness: 1.02 }) // Slight brightness variation
+        .png()
+        .toBuffer();
+      
+      panelOverlays.push({
+        input: finalPanel,
         left: panelX,
         top: panelY,
       });
     }
     
-    // Verify we have the expected number of panels in the mask
-    const expectedCount = analysis.panelCount;
-    if (maskComposites.length < expectedCount) {
-      console.log(`[ProcessDesign] Only ${maskComposites.length}/${expectedCount} panels in mask, using fallback`);
-      maskComposites.length = 0; // Clear and rebuild with defaults
-      
-      // Use default layout with CORRECT panel count
-      const fallbackLayout = createDefaultLayout(expectedCount);
-      for (const panel of fallbackLayout.panels) {
-        const panelW = Math.round((panel.width / 100) * innerWidth);
-        const panelH = Math.round((panel.height / 100) * innerHeight);
-        const panelX = offsetX + Math.round((panel.x / 100) * innerWidth - panelW / 2);
-        const panelY = offsetY + Math.round((panel.y / 100) * innerHeight - panelH / 2);
-        
-        const rectBuffer = await sharp({
-          create: {
-            width: Math.max(1, panelW),
-            height: Math.max(1, panelH),
-            channels: 4,
-            background: { r: 255, g: 255, b: 255, alpha: 255 }
-          }
-        }).png().toBuffer();
-
-        maskComposites.push({
-          input: rectBuffer,
-          left: Math.max(0, panelX),
-          top: Math.max(0, panelY),
-        });
-      }
-      // Update analysis.panels for later compositing
-      analysis.panels = fallbackLayout.panels;
-    } else {
-      // Use validated panels for compositing
-      analysis.panels = validatedPanels;
-    }
-    
-    // Final check: ensure we have panels
-    if (maskComposites.length === 0) {
-      throw new Error("Could not create valid panel layout");
-    }
-    
-    console.log(`[ProcessDesign] Created mask with ${maskComposites.length} panel regions`);
-
-    // Create the 1024x1024 mask: transparent base with white panel areas
-    const maskBuffer = await sharp({
-      create: {
-        width: targetSize,
-        height: targetSize,
-        channels: 4,
-        background: { r: 0, g: 0, b: 0, alpha: 0 } // Transparent = don't edit
-      }
-    })
-      .composite(maskComposites)
-      .png()
-      .toBuffer();
-
-    // Resize and letterbox original image to 1024x1024
-    const resizedInner = await sharp(originalBuffer)
-      .resize(innerWidth, innerHeight, { fit: "fill" })
-      .png()
-      .toBuffer();
-
-    // Place the resized image on a 1024x1024 black canvas (letterboxed)
-    const resizedOriginal = await sharp({
-      create: {
-        width: targetSize,
-        height: targetSize,
-        channels: 4,
-        background: { r: 0, g: 0, b: 0, alpha: 255 }
-      }
-    })
-      .composite([{ input: resizedInner, left: offsetX, top: offsetY }])
-      .png()
-      .toBuffer();
-
-    // Step 3: Use gpt-image-1 edit with mask to add panels
-    console.log(`[ProcessDesign] Generating panels with AI (mask-based edit)...`);
-
-    const editPrompt = `Add ${analysis.panelCount} acoustic felt sound panels to the wall in this room, exactly in the masked areas.
-
-Panel description: ${panelSet.description}
-
-Requirements:
-- Each panel should have a soft felt/fabric texture
-- Add realistic shadows matching the room's lighting (coming from ${analysis.lightingDirection || 'above'})
-- Panels should look like they are physically mounted on the wall
-- Match the perspective of the room
-- Colors should complement the ${analysis.wallColor || 'existing'} wall
-- Keep ALL other elements of the room exactly as they are`;
-
-    // Convert buffers to uploadable files for OpenAI API
-    const imageFile = await toFile(resizedOriginal, "image.png", { type: "image/png" });
-    const maskFile = await toFile(maskBuffer, "mask.png", { type: "image/png" });
-
-    const response = await openai.images.edit({
-      model: "gpt-image-1",
-      image: imageFile,
-      mask: maskFile,
-      prompt: editPrompt,
-      n: 1,
-      size: "1024x1024",
-    });
-
-    console.log(`[ProcessDesign] Received AI edit response`);
-
-    const b64_json = response.data?.[0]?.b64_json;
-    
-    if (!b64_json) {
-      throw new Error("No image in response");
-    }
-
-    // Extract panel regions from AI result and composite onto ORIGINAL image
-    const editedBuffer = Buffer.from(b64_json, "base64");
-    
-    // Extract the inner region from the letterboxed AI result
-    const editedInner = await sharp(editedBuffer)
-      .extract({ left: offsetX, top: offsetY, width: innerWidth, height: innerHeight })
-      .png()
-      .toBuffer();
-
-    // For each panel position, extract that region from the AI result
-    // and composite it onto the original image
-    const panelOverlays: sharp.OverlayOptions[] = [];
-    
-    for (const panel of analysis.panels) {
-      // Panel position in the inner (letterboxed) coordinate space
-      const panelW = Math.round((panel.width / 100) * innerWidth);
-      const panelH = Math.round((panel.height / 100) * innerHeight);
-      const panelX = Math.round((panel.x / 100) * innerWidth - panelW / 2);
-      const panelY = Math.round((panel.y / 100) * innerHeight - panelH / 2);
-      
-      // Skip invalid panels
-      if (panelX < 0 || panelY < 0 || panelX + panelW > innerWidth || panelY + panelH > innerHeight) {
-        continue;
-      }
-      
-      try {
-        // Extract this panel region from the AI-edited image
-        const panelRegion = await sharp(editedInner)
-          .extract({ left: panelX, top: panelY, width: panelW, height: panelH })
-          .png()
-          .toBuffer();
-        
-        // Scale panel position back to original image dimensions
-        const origPanelX = Math.round((panelX / innerWidth) * origWidth);
-        const origPanelY = Math.round((panelY / innerHeight) * origHeight);
-        const origPanelW = Math.round((panelW / innerWidth) * origWidth);
-        const origPanelH = Math.round((panelH / innerHeight) * origHeight);
-        
-        // Resize the extracted panel to original scale
-        const scaledPanel = await sharp(panelRegion)
-          .resize(origPanelW, origPanelH, { fit: "fill" })
-          .png()
-          .toBuffer();
-        
-        panelOverlays.push({
-          input: scaledPanel,
-          left: origPanelX,
-          top: origPanelY,
-        });
-      } catch (extractError) {
-        console.log(`[ProcessDesign] Could not extract panel region, skipping`);
-      }
-    }
-
-    // Verify we have panel overlays before marking as complete
     if (panelOverlays.length === 0) {
-      console.error(`[ProcessDesign] No panels extracted from AI result`);
-      throw new Error("Failed to extract any panels from AI-generated image");
+      throw new Error("Could not create any valid panel overlays");
     }
     
-    console.log(`[ProcessDesign] Extracted ${panelOverlays.length} panels from AI result`);
+    console.log(`[ProcessDesign] Created ${panelOverlays.length} panel overlays (including shadows)`);
 
-    // Composite panel regions onto the ORIGINAL untouched image
+    // Composite all panels onto the original image
     const resultBuffer = await sharp(originalBuffer)
       .composite(panelOverlays)
       .png()
