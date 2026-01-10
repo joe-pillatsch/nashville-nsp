@@ -1,38 +1,44 @@
-import { type User, type InsertUser } from "@shared/schema";
-import { randomUUID } from "crypto";
 
-// modify the interface with any CRUD methods
-// you might need
+import { designs, type Design, type InsertDesign } from "@shared/schema";
+import { db } from "./db";
+import { eq } from "drizzle-orm";
 
 export interface IStorage {
-  getUser(id: string): Promise<User | undefined>;
-  getUserByUsername(username: string): Promise<User | undefined>;
-  createUser(user: InsertUser): Promise<User>;
+  createDesign(design: InsertDesign): Promise<Design>;
+  getDesign(id: number): Promise<Design | undefined>;
+  getDesigns(): Promise<Design[]>;
+  updateDesignStatus(id: number, status: string, processedImageUrl?: string): Promise<Design>;
 }
 
-export class MemStorage implements IStorage {
-  private users: Map<string, User>;
-
-  constructor() {
-    this.users = new Map();
+export class DatabaseStorage implements IStorage {
+  async createDesign(insertDesign: InsertDesign): Promise<Design> {
+    const [design] = await db
+      .insert(designs)
+      .values(insertDesign)
+      .returning();
+    return design;
   }
 
-  async getUser(id: string): Promise<User | undefined> {
-    return this.users.get(id);
+  async getDesign(id: number): Promise<Design | undefined> {
+    const [design] = await db
+      .select()
+      .from(designs)
+      .where(eq(designs.id, id));
+    return design;
   }
 
-  async getUserByUsername(username: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find(
-      (user) => user.username === username,
-    );
+  async getDesigns(): Promise<Design[]> {
+    return await db.select().from(designs).orderBy(designs.id);
   }
 
-  async createUser(insertUser: InsertUser): Promise<User> {
-    const id = randomUUID();
-    const user: User = { ...insertUser, id };
-    this.users.set(id, user);
-    return user;
+  async updateDesignStatus(id: number, status: string, processedImageUrl?: string): Promise<Design> {
+    const [updated] = await db
+      .update(designs)
+      .set({ status, processedImageUrl })
+      .where(eq(designs.id, id))
+      .returning();
+    return updated;
   }
 }
 
-export const storage = new MemStorage();
+export const storage = new DatabaseStorage();
