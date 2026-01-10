@@ -1,10 +1,34 @@
 
 import type { Express } from "express";
-import { createServer, type Server } from "http";
+import type { Server } from "http";
 import { storage } from "./storage";
 import { insertDesignSchema } from "@shared/schema";
 import { openai } from "./replit_integrations/image/client";
 import { z } from "zod";
+import multer from "multer";
+import path from "path";
+import fs from "fs";
+
+// Configure multer for file uploads
+const uploadDir = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const multerStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, uniqueSuffix + path.extname(file.originalname));
+  },
+});
+
+const upload = multer({ 
+  storage: multerStorage,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
+});
 
 export async function registerRoutes(
   httpServer: Server,
@@ -43,11 +67,30 @@ export async function registerRoutes(
     res.json(design);
   });
 
-  // Simple file upload endpoint (mock for now since we don't have object storage integration yet)
-  // In a real app, use the Object Storage integration.
-  // For MVP, we'll just echo back the data URL or assume client sends data URL.
-  // Actually, let's implement a basic in-memory or file-system upload for the MVP session if needed.
-  // But client is sending base64/dataURL for now as per schema "originalImageUrl".
+  // File upload endpoint
+  app.post("/api/upload", upload.single("file"), (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: "No file uploaded" });
+      }
+      
+      // Read file and convert to base64 data URL
+      const filePath = req.file.path;
+      const fileBuffer = fs.readFileSync(filePath);
+      const base64 = fileBuffer.toString("base64");
+      const mimeType = req.file.mimetype;
+      const dataUrl = `data:${mimeType};base64,${base64}`;
+      
+      // Clean up the file after reading
+      fs.unlinkSync(filePath);
+      
+      console.log(`[Upload] Successfully processed file: ${req.file.originalname}`);
+      res.json({ url: dataUrl });
+    } catch (error) {
+      console.error("[Upload] Error:", error);
+      res.status(500).json({ message: "Upload failed" });
+    }
+  });
 
   return httpServer;
 }
