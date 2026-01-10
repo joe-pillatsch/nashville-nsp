@@ -55,16 +55,13 @@ export async function registerRoutes(
 // Background processing function
 async function processDesign(designId: number, imageUrl: string, prompt: string) {
   try {
+    console.log(`[ProcessDesign] Starting processing for design ${designId}`);
     await storage.updateDesignStatus(designId, "processing");
 
-    // 1. Analyze the image to understand the room context (using GPT-4o Vision)
-    // We'll skip this complex step for the MVP and trust DALL-E 3 with a good prompt.
-    // Or we can use the `images.edit` if we had a mask.
-
     // MVP Approach: Generate a NEW image based on a strong descriptive prompt + user prompt.
-    // "A photorealistic modern room with a blank wall featuring [PROMPT] acoustic sound panels"
-    
     const enhancedPrompt = `A photorealistic interior design shot of a modern room with a blank wall that has ${prompt} installed on it. High quality, architectural photography style.`;
+    
+    console.log(`[ProcessDesign] Sending prompt to OpenAI: "${enhancedPrompt}"`);
 
     const response = await openai.images.generate({
       model: "gpt-image-1",
@@ -73,18 +70,25 @@ async function processDesign(designId: number, imageUrl: string, prompt: string)
       size: "1024x1024",
     });
 
+    console.log(`[ProcessDesign] Received response from OpenAI`);
+
     // The integration returns base64 for gpt-image-1
     const b64_json = response.data[0].b64_json;
     const generatedUrl = b64_json ? `data:image/png;base64,${b64_json}` : response.data[0].url;
 
     if (generatedUrl) {
+      console.log(`[ProcessDesign] Successfully generated image for design ${designId}`);
       await storage.updateDesignStatus(designId, "completed", generatedUrl);
     } else {
+      console.error(`[ProcessDesign] No image URL in response for design ${designId}`);
       await storage.updateDesignStatus(designId, "failed");
     }
 
   } catch (error) {
-    console.error("Error processing design:", error);
+    console.error(`[ProcessDesign] Error processing design ${designId}:`, error);
+    if (error instanceof Error) {
+        console.error(`[ProcessDesign] Stack trace:`, error.stack);
+    }
     await storage.updateDesignStatus(designId, "failed");
   }
 }
