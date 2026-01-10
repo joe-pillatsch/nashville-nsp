@@ -8,6 +8,14 @@ import { z } from "zod";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
+import sharp from "sharp";
+
+// Panel set configurations
+const PANEL_SETS = {
+  small: { file: "panels-3.png", name: "Set of 3" },
+  medium: { file: "panels-5.png", name: "Set of 5" },
+  large: { file: "panels-10.png", name: "Set of 10" },
+};
 
 // Configure multer for file uploads
 const uploadDir = path.join(process.cwd(), "uploads");
@@ -101,36 +109,118 @@ async function processDesign(designId: number, imageUrl: string, prompt: string)
     console.log(`[ProcessDesign] Starting processing for design ${designId}`);
     await storage.updateDesignStatus(designId, "processing");
 
-    // MVP Approach: Generate a NEW image based on a strong descriptive prompt + user prompt.
-    const enhancedPrompt = `A photorealistic interior design shot of a modern room with a blank wall that has ${prompt} installed on it. High quality, architectural photography style.`;
+    // Step 1: Analyze the wall using GPT-4 Vision to determine size and get placement info
+    console.log(`[ProcessDesign] Analyzing wall with GPT-4 Vision...`);
     
-    console.log(`[ProcessDesign] Sending prompt to OpenAI: "${enhancedPrompt}"`);
+    const analysisResponse = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `Analyze this room image. I need to place acoustic sound panels on the main visible wall.
+              
+Please respond with JSON only in this format:
+{
+  "wallSize": "small" | "medium" | "large",
+  "wallBounds": {
+    "x": number (0-100, percentage from left),
+    "y": number (0-100, percentage from top),
+    "width": number (0-100, percentage of image width),
+    "height": number (0-100, percentage of image height)
+  },
+  "confidence": number (0-1)
+}
 
-    const response = await openai.images.generate({
-      model: "gpt-image-1",
-      prompt: enhancedPrompt,
-      n: 1,
-      size: "1024x1024",
+Guidelines:
+- "small" = wall area less than 30% of image, use 3 panels
+- "medium" = wall area 30-50% of image, use 5 panels
+- "large" = wall area greater than 50% of image, use 10 panels
+- wallBounds should define where the blank wall area is located`
+            },
+            {
+              type: "image_url",
+              image_url: { url: imageUrl }
+            }
+          ]
+        }
+      ],
+      max_tokens: 500,
     });
 
-    console.log(`[ProcessDesign] Received response from OpenAI`);
+    const analysisText = analysisResponse.choices[0]?.message?.content || "";
+    console.log(`[ProcessDesign] Wall analysis result: ${analysisText}`);
 
-    // The integration returns base64 for gpt-image-1
-    const b64_json = response.data[0].b64_json;
-    const generatedUrl = b64_json ? `data:image/png;base64,${b64_json}` : response.data[0].url;
-
-    if (generatedUrl) {
-      console.log(`[ProcessDesign] Successfully generated image for design ${designId}`);
-      await storage.updateDesignStatus(designId, "completed", generatedUrl);
-    } else {
-      console.error(`[ProcessDesign] No image URL in response for design ${designId}`);
-      await storage.updateDesignStatus(designId, "failed");
+    // Parse the JSON response
+    let wallAnalysis: { 
+      wallSize: "small" | "medium" | "large";
+      wallBounds: { x: number; y: number; width: number; height: number };
+    };
+    
+    try {
+      // Extract JSON from the response (handle markdown code blocks)
+      const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("No JSON found in response");
+      wallAnalysis = JSON.parse(jsonMatch[0]);
+    } catch (parseError) {
+      console.log(`[ProcessDesign] Could not parse analysis, defaulting to medium`);
+      wallAnalysis = { 
+        wallSize: "medium", 
+        wallBounds: { x: 20, y: 20, width: 60, height: 60 } 
+      };
     }
+
+    // Step 2: Select the appropriate panel set
+    const panelSet = PANEL_SETS[wallAnalysis.wallSize];
+    console.log(`[ProcessDesign] Selected panel set: ${panelSet.name} for ${wallAnalysis.wallSize} wall`);
+
+    // Step 3: Composite the panels onto the original image using sharp
+    const panelPath = path.join(process.cwd(), "client", "public", panelSet.file);
+    
+    // Convert base64 data URL to buffer
+    const base64Data = imageUrl.replace(/^data:image\/\w+;base64,/, "");
+    const originalBuffer = Buffer.from(base64Data, "base64");
+    
+    // Get original image dimensions
+    const originalMeta = await sharp(originalBuffer).metadata();
+    const origWidth = originalMeta.width || 1024;
+    const origHeight = originalMeta.height || 1024;
+
+    // Calculate panel overlay position and size based on wall bounds
+    const overlayX = Math.round((wallAnalysis.wallBounds.x / 100) * origWidth);
+    const overlayY = Math.round((wallAnalysis.wallBounds.y / 100) * origHeight);
+    const overlayWidth = Math.round((wallAnalysis.wallBounds.width / 100) * origWidth);
+    const overlayHeight = Math.round((wallAnalysis.wallBounds.height / 100) * origHeight);
+
+    // Resize the panel overlay to fit the wall area
+    const panelBuffer = await sharp(panelPath)
+      .resize(overlayWidth, overlayHeight, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .toBuffer();
+
+    // Composite the panels onto the original image
+    const compositeBuffer = await sharp(originalBuffer)
+      .composite([
+        {
+          input: panelBuffer,
+          left: overlayX,
+          top: overlayY,
+        }
+      ])
+      .png()
+      .toBuffer();
+
+    const resultBase64 = compositeBuffer.toString("base64");
+    const resultUrl = `data:image/png;base64,${resultBase64}`;
+
+    console.log(`[ProcessDesign] Successfully composited panels for design ${designId}`);
+    await storage.updateDesignStatus(designId, "completed", resultUrl);
 
   } catch (error) {
     console.error(`[ProcessDesign] Error processing design ${designId}:`, error);
     if (error instanceof Error) {
-        console.error(`[ProcessDesign] Stack trace:`, error.stack);
+      console.error(`[ProcessDesign] Stack trace:`, error.stack);
     }
     await storage.updateDesignStatus(designId, "failed");
   }
