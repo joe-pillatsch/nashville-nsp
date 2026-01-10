@@ -10,27 +10,6 @@ import path from "path";
 import fs from "fs";
 import sharp from "sharp";
 
-// Panel set configurations with detailed descriptions for AI
-const PANEL_SETS = {
-  small: { 
-    file: "panels-3.png", 
-    name: "Set of 3",
-    count: 3,
-    description: "3 acoustic felt panels: one large vertical rectangle (about 2ft tall x 1ft wide), one medium square (1ft x 1ft), and one small horizontal rectangle (1ft wide x 0.5ft tall). Modern minimalist design in warm earth tones - terracotta, sage green, and cream."
-  },
-  medium: { 
-    file: "panels-5.png", 
-    name: "Set of 5",
-    count: 5,
-    description: "5 acoustic felt panels in varying sizes: two large vertical rectangles (2ft x 1ft), two medium squares (1ft x 1ft), and one horizontal rectangle (1.5ft x 0.75ft). Coordinated color palette with muted natural tones - olive, rust, beige, charcoal, and warm white."
-  },
-  large: { 
-    file: "panels-10.png", 
-    name: "Set of 10",
-    count: 10,
-    description: "10 acoustic felt panels creating a gallery wall effect: mix of vertical rectangles, horizontal rectangles, and squares in various sizes (ranging from 0.5ft to 2ft). Rich color palette including deep burgundy, forest green, navy, terracotta, cream, and natural wood tones."
-  },
-};
 
 // Configure multer for file uploads
 const uploadDir = path.join(process.cwd(), "uploads");
@@ -142,7 +121,7 @@ async function processDesign(designId: number, imageUrl: string, prompt: string)
     const origHeight = originalMeta.height || 1024;
     console.log(`[ProcessDesign] Original image size: ${origWidth}x${origHeight}`);
 
-    // Step 1: Analyze wall bounds from GPT-4o Vision (simplified - only wall detection)
+    // Step 1: Analyze wall bounds and estimate dimensions from GPT-4o Vision
     console.log(`[ProcessDesign] Analyzing wall with GPT-4o Vision...`);
 
     const analysisResponse = await openai.chat.completions.create({
@@ -163,14 +142,15 @@ Respond with JSON ONLY:
     "width": number (0-100, wall width as percentage of image),
     "height": number (0-100, wall height as percentage of image)
   },
-  "wallSize": "small" | "medium" | "large"
+  "wallWidthFt": number (estimated wall width in feet, typically 8-20 feet),
+  "wallHeightFt": number (estimated wall height in feet, typically 8-10 feet)
 }
 
 Guidelines:
-- "small" = wall is less than 30% of image area
-- "medium" = wall is 30-50% of image area
-- "large" = wall is over 50% of image area
-- Focus on the largest clear wall space visible`
+- Estimate the actual wall dimensions in feet based on typical room proportions
+- Standard residential ceiling height is 8-9 feet
+- Look for context clues like doors (typically 6'8" tall), windows, furniture
+- Focus on the largest clear wall space visible for panel placement`
             },
             {
               type: "image_url",
@@ -185,14 +165,16 @@ Guidelines:
     const analysisText = analysisResponse.choices[0]?.message?.content || "";
     console.log(`[ProcessDesign] Wall analysis: ${analysisText.substring(0, 300)}`);
 
-    // Parse the wall bounds
+    // Parse the wall bounds and dimensions
     interface WallAnalysis {
       wallBounds: { x: number; y: number; width: number; height: number };
-      wallSize: "small" | "medium" | "large";
+      wallWidthFt: number;
+      wallHeightFt: number;
     }
 
     let wallBounds = { x: 15, y: 15, width: 70, height: 70 }; // defaults
-    let panelCount: 3 | 5 | 10 = 5;
+    let wallWidthFt = 12; // default wall width in feet
+    let wallHeightFt = 8; // default wall height in feet
     
     try {
       const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
@@ -209,22 +191,26 @@ Guidelines:
           };
         }
         
-        // Determine panel count from wall size
-        if (parsed.wallSize === "small") {
-          panelCount = 3;
-        } else if (parsed.wallSize === "large") {
-          panelCount = 10;
-        } else {
-          panelCount = 5;
+        // Extract wall dimensions in feet
+        if (parsed.wallWidthFt) {
+          wallWidthFt = Math.max(5, Math.min(30, Number(parsed.wallWidthFt) || 12));
+        }
+        if (parsed.wallHeightFt) {
+          wallHeightFt = Math.max(6, Math.min(15, Number(parsed.wallHeightFt) || 8));
         }
       }
     } catch (parseError) {
       console.log(`[ProcessDesign] Parse error, using defaults`);
     }
 
-    // Get layout template and apply to wall bounds
-    const template = getLayoutTemplate(panelCount);
-    console.log(`[ProcessDesign] Using template: ${template.name} with ${panelCount} panels`);
+    // Determine which panel set fits best on this wall
+    const panelSetId = selectBestPanelSet(wallWidthFt, wallHeightFt);
+    const panelSet = PANEL_SETS[panelSetId];
+    console.log(`[ProcessDesign] Selected ${panelSet.name} for wall ${wallWidthFt}ft x ${wallHeightFt}ft`);
+
+    // Generate layout using real panel dimensions
+    const layoutPanels = generateLayout(panelSetId, wallWidthFt, wallHeightFt);
+    console.log(`[ProcessDesign] Generated layout with ${layoutPanels.length} panels`);
 
     // Wall bounds in pixels
     const wallLeftPx = (wallBounds.x / 100) * origWidth;
@@ -233,15 +219,14 @@ Guidelines:
     const wallHeightPx = (wallBounds.height / 100) * origHeight;
     
     console.log(`[ProcessDesign] Wall bounds in pixels: (${Math.round(wallLeftPx)}, ${Math.round(wallTopPx)}) ${Math.round(wallWidthPx)}x${Math.round(wallHeightPx)}`);
-    console.log(`[ProcessDesign] Creating ${template.panels.length} flat black panels`);
 
     // Step 2: Create flat pure-black panel overlays (no shadows, no effects)
     const panelOverlays: sharp.OverlayOptions[] = [];
     
-    for (let i = 0; i < template.panels.length; i++) {
-      const panel = template.panels[i];
+    for (let i = 0; i < layoutPanels.length; i++) {
+      const panel = layoutPanels[i];
       
-      // Template values are percentages (0-100) within a normalized space
+      // Layout values are percentages (0-100) within wall bounds
       // Convert directly to pixels within wall bounds
       const panelCenterX = wallLeftPx + (panel.x / 100) * wallWidthPx;
       const panelCenterY = wallTopPx + (panel.y / 100) * wallHeightPx;
@@ -316,81 +301,159 @@ Guidelines:
   }
 }
 
-// Layout template library - matches the actual "Set of 5" panel proportions
-// Panels are 1ft wide x varying heights (4ft, 4ft, 2.5ft, 2.5ft, 1.5ft)
-// Ratio approximately 1:4 for tallest panels
-const LAYOUT_TEMPLATES = {
-  // 5-panel layout matching the "Set of 5" reference image
-  // Panels arranged left to right: tall, tall, medium, medium, short
-  // All panels bottom-aligned at roughly the same baseline
-  setOfFive: {
+// Panel set specifications with real-world dimensions (in feet)
+// Each panel has widthFt and heightFt representing actual physical size
+interface PanelSpec {
+  widthFt: number;
+  heightFt: number;
+  quantity: number;
+}
+
+interface PanelSet {
+  name: string;
+  panels: PanelSpec[];
+  totalPanelCount: number;
+  minWallWidthFt: number;  // Minimum wall width needed to fit all panels
+  maxPanelHeightFt: number; // Tallest panel in the set
+}
+
+// Calculated minimum wall widths:
+// Set of 3: 3 × 1ft panels + 2 × 0.5ft gaps = 4ft total, need ~5ft with margin
+// Set of 5: 5 × 1ft panels + 4 × 0.5ft gaps = 7ft total, need ~8ft with margin
+// Set of 10: (4+2+2)×1ft + 2×2ft + 9×0.5ft gaps = 8 + 4 + 4.5 = 16.5ft, need ~18ft
+const PANEL_SETS: Record<3 | 5 | 10, PanelSet> = {
+  3: {
+    name: "Set of 3",
+    panels: [
+      { widthFt: 1, heightFt: 4, quantity: 3 },  // Three 1'×4' panels
+    ],
+    totalPanelCount: 3,
+    minWallWidthFt: 5,   // 3×1ft + 2×0.5ft gaps = 4ft, plus margin
+    maxPanelHeightFt: 4,
+  },
+  5: {
     name: "Set of 5",
-    count: 5,
     panels: [
-      // Panel 1 (leftmost): 4 feet tall - width 10%, height 50%
-      { x: 18, y: 50, width: 10, height: 50 },
-      // Panel 2: 4 feet tall
-      { x: 34, y: 50, width: 10, height: 50 },
-      // Panel 3 (center): ~2.5 feet tall - shorter
-      { x: 50, y: 56, width: 10, height: 38 },
-      // Panel 4: ~2.5 feet tall
-      { x: 66, y: 53, width: 10, height: 44 },
-      // Panel 5 (rightmost): ~1.5 feet tall - shortest
-      { x: 82, y: 62, width: 10, height: 26 },
-    ]
+      { widthFt: 1, heightFt: 4, quantity: 2 },  // Two 1'×4' panels
+      { widthFt: 1, heightFt: 3, quantity: 2 },  // Two 1'×3' panels
+      { widthFt: 1, heightFt: 2, quantity: 1 },  // One 1'×2' panel
+    ],
+    totalPanelCount: 5,
+    minWallWidthFt: 8,   // 5×1ft + 4×0.5ft gaps = 7ft, plus margin
+    maxPanelHeightFt: 4,
   },
-  // 3-panel layouts - also using tall vertical proportions
-  threeVertical: {
-    name: "Three Vertical Bars",
-    count: 3,
+  10: {
+    name: "Set of 10",
     panels: [
-      { x: 30, y: 50, width: 10, height: 50 },
-      { x: 50, y: 50, width: 10, height: 50 },
-      { x: 70, y: 50, width: 10, height: 50 },
-    ]
-  },
-  // 10-panel layouts - two rows of tall panels
-  galleryGrid: {
-    name: "Gallery Grid",
-    count: 10,
-    panels: [
-      // Top row - 5 panels
-      { x: 18, y: 30, width: 8, height: 35 },
-      { x: 34, y: 30, width: 8, height: 35 },
-      { x: 50, y: 30, width: 8, height: 35 },
-      { x: 66, y: 30, width: 8, height: 35 },
-      { x: 82, y: 30, width: 8, height: 35 },
-      // Bottom row - 5 panels
-      { x: 18, y: 75, width: 8, height: 35 },
-      { x: 34, y: 75, width: 8, height: 35 },
-      { x: 50, y: 75, width: 8, height: 35 },
-      { x: 66, y: 75, width: 8, height: 35 },
-      { x: 82, y: 75, width: 8, height: 35 },
-    ]
+      { widthFt: 1, heightFt: 4, quantity: 4 },  // Four 1'×4' panels
+      { widthFt: 1, heightFt: 3, quantity: 2 },  // Two 1'×3' panels
+      { widthFt: 1, heightFt: 2, quantity: 2 },  // Two 1'×2' panels
+      { widthFt: 2, heightFt: 2, quantity: 2 },  // Two 2'×2' panels
+    ],
+    totalPanelCount: 10,
+    minWallWidthFt: 18,  // 12ft panels + 4.5ft gaps = 16.5ft, plus margin
+    maxPanelHeightFt: 4,
   },
 };
 
-// Get a layout template based on panel count
-function getLayoutTemplate(count: 3 | 5 | 10): typeof LAYOUT_TEMPLATES.setOfFive {
-  if (count === 3) {
-    return LAYOUT_TEMPLATES.threeVertical;
-  } else if (count === 10) {
-    return LAYOUT_TEMPLATES.galleryGrid;
-  } else {
-    // Use the "Set of 5" pattern matching the reference image
-    return LAYOUT_TEMPLATES.setOfFive;
-  }
+// Expand panel specs into individual panel instances
+interface IndividualPanel {
+  widthFt: number;
+  heightFt: number;
 }
 
-// Create a default panel layout
-function createDefaultLayout(count: 3 | 5 | 10) {
-  const template = getLayoutTemplate(count);
+function expandPanelSet(setId: 3 | 5 | 10): IndividualPanel[] {
+  const set = PANEL_SETS[setId];
+  const panels: IndividualPanel[] = [];
   
-  return {
-    panelCount: count,
-    wallBounds: { x: 15, y: 15, width: 70, height: 70 },
-    panels: template.panels,
-    wallColor: "white",
-    lightingDirection: "above"
-  };
+  for (const spec of set.panels) {
+    for (let i = 0; i < spec.quantity; i++) {
+      panels.push({ widthFt: spec.widthFt, heightFt: spec.heightFt });
+    }
+  }
+  
+  return panels;
+}
+
+// Generate layout positions for a panel set given wall dimensions in feet
+// Returns panel positions as percentages (0-100) within the wall bounds
+interface LayoutPanel {
+  x: number;      // Center X as percentage of wall width
+  y: number;      // Center Y as percentage of wall height
+  width: number;  // Width as percentage of wall width
+  height: number; // Height as percentage of wall height
+}
+
+function generateLayout(
+  setId: 3 | 5 | 10,
+  wallWidthFt: number,
+  wallHeightFt: number
+): LayoutPanel[] {
+  const panels = expandPanelSet(setId);
+  const layouts: LayoutPanel[] = [];
+  
+  // Sort panels by height (tallest first) to arrange them aesthetically
+  // For Set of 5: [4ft, 4ft, 3ft, 3ft, 2ft]
+  panels.sort((a, b) => b.heightFt - a.heightFt);
+  
+  // Calculate total width needed (sum of panel widths + gaps)
+  let gapFt = 0.5; // 6 inches between panels (default)
+  const totalPanelWidthFt = panels.reduce((sum, p) => sum + p.widthFt, 0);
+  let totalGapsWidthFt = (panels.length - 1) * gapFt;
+  let totalWidthFt = totalPanelWidthFt + totalGapsWidthFt;
+  
+  // If total width exceeds wall width, reduce gaps to fit
+  if (totalWidthFt > wallWidthFt) {
+    const availableGapSpace = wallWidthFt - totalPanelWidthFt;
+    gapFt = Math.max(0.1, availableGapSpace / (panels.length - 1)); // Min 1.2 inches
+    totalGapsWidthFt = (panels.length - 1) * gapFt;
+    totalWidthFt = totalPanelWidthFt + totalGapsWidthFt;
+  }
+  
+  // Calculate starting X position to center the group
+  const startXFt = Math.max(0, (wallWidthFt - totalWidthFt) / 2);
+  
+  // Position each panel, bottom-aligned with some margin from wall bottom
+  const bottomMarginFt = 1.5; // Distance from bottom of wall to bottom of lowest panel
+  let currentXFt = startXFt;
+  
+  for (const panel of panels) {
+    // Calculate center positions
+    const panelCenterXFt = currentXFt + panel.widthFt / 2;
+    const panelBottomFt = bottomMarginFt;
+    const panelCenterYFt = wallHeightFt - panelBottomFt - panel.heightFt / 2;
+    
+    // Convert to percentages of wall dimensions, clamped to valid range
+    const xPct = Math.max(0, Math.min(100, (panelCenterXFt / wallWidthFt) * 100));
+    const yPct = Math.max(0, Math.min(100, (panelCenterYFt / wallHeightFt) * 100));
+    const widthPct = Math.max(1, Math.min(100, (panel.widthFt / wallWidthFt) * 100));
+    const heightPct = Math.max(1, Math.min(100, (panel.heightFt / wallHeightFt) * 100));
+    
+    layouts.push({
+      x: xPct,
+      y: yPct,
+      width: widthPct,
+      height: heightPct,
+    });
+    
+    currentXFt += panel.widthFt + gapFt;
+  }
+  
+  return layouts;
+}
+
+// Determine which panel set fits best on a given wall
+function selectBestPanelSet(wallWidthFt: number, wallHeightFt: number): 3 | 5 | 10 {
+  // Check which sets fit (largest set that fits is preferred)
+  const candidates: (3 | 5 | 10)[] = [10, 5, 3];
+  
+  for (const setId of candidates) {
+    const set = PANEL_SETS[setId];
+    if (wallWidthFt >= set.minWallWidthFt && wallHeightFt >= set.maxPanelHeightFt + 2) {
+      return setId;
+    }
+  }
+  
+  // Default to smallest set if wall is very small
+  return 3;
 }
