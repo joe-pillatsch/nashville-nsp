@@ -142,7 +142,7 @@ async function processDesign(designId: number, imageUrl: string, prompt: string)
     const origHeight = originalMeta.height || 1024;
     console.log(`[ProcessDesign] Original image size: ${origWidth}x${origHeight}`);
 
-    // Step 1: Analyze wall and get panel positions from GPT-4o Vision
+    // Step 1: Analyze wall bounds from GPT-4o Vision (simplified - only wall detection)
     console.log(`[ProcessDesign] Analyzing wall with GPT-4o Vision...`);
 
     const analysisResponse = await openai.chat.completions.create({
@@ -153,39 +153,24 @@ async function processDesign(designId: number, imageUrl: string, prompt: string)
           content: [
             {
               type: "text",
-              text: `You are an interior design expert. Analyze this room photo to place acoustic sound panels on the main visible wall.
-
-Based on the wall size, recommend either 3, 5, or 10 panels:
-- Small wall (less than 30% of image): 3 panels
-- Medium wall (30-50% of image): 5 panels  
-- Large wall (over 50% of image): 10 panels
+              text: `Analyze this room photo to find the main visible wall suitable for hanging acoustic panels.
 
 Respond with JSON ONLY:
 {
-  "panelCount": 3 | 5 | 10,
   "wallBounds": {
-    "x": number (0-100, left edge percentage),
-    "y": number (0-100, top edge percentage),
-    "width": number (0-100, wall width as percentage),
-    "height": number (0-100, wall height as percentage)
+    "x": number (0-100, left edge as percentage of image width),
+    "y": number (0-100, top edge as percentage of image height),
+    "width": number (0-100, wall width as percentage of image),
+    "height": number (0-100, wall height as percentage of image)
   },
-  "panels": [
-    {
-      "x": number (0-100, center X as percentage),
-      "y": number (0-100, center Y as percentage),
-      "width": number (5-15, width as percentage),
-      "height": number (8-25, height as percentage)
-    }
-  ],
-  "wallColor": "description of wall color",
-  "lightingDirection": "left | right | above | diffuse"
+  "wallSize": "small" | "medium" | "large"
 }
 
 Guidelines:
-- Create an asymmetric gallery-style arrangement
-- Panels should be within the wall bounds
-- Space panels with 2-4% gaps between them
-- Vary sizes for visual interest`
+- "small" = wall is less than 30% of image area
+- "medium" = wall is 30-50% of image area
+- "large" = wall is over 50% of image area
+- Focus on the largest clear wall space visible`
             },
             {
               type: "image_url",
@@ -194,140 +179,78 @@ Guidelines:
           ]
         }
       ],
-      max_tokens: 2000,
+      max_tokens: 500,
     });
 
     const analysisText = analysisResponse.choices[0]?.message?.content || "";
-    console.log(`[ProcessDesign] Wall analysis: ${analysisText.substring(0, 500)}`);
+    console.log(`[ProcessDesign] Wall analysis: ${analysisText.substring(0, 300)}`);
 
-    // Parse the analysis
-    interface LayoutAnalysis {
-      panelCount: 3 | 5 | 10;
+    // Parse the wall bounds
+    interface WallAnalysis {
       wallBounds: { x: number; y: number; width: number; height: number };
-      panels: PanelPosition[];
-      wallColor: string;
-      lightingDirection: string;
+      wallSize: "small" | "medium" | "large";
     }
 
-    let analysis: LayoutAnalysis;
+    let wallBounds = { x: 15, y: 15, width: 70, height: 70 }; // defaults
+    let panelCount: 3 | 5 | 10 = 5;
     
     try {
       const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error("No JSON found");
-      analysis = JSON.parse(jsonMatch[0]);
-      
-      // CRITICAL: Coerce panelCount to exactly 3, 5, or 10
-      const rawCount = Number(analysis.panelCount) || 5;
-      if (rawCount <= 3) {
-        analysis.panelCount = 3;
-      } else if (rawCount <= 7) {
-        analysis.panelCount = 5;
-      } else {
-        analysis.panelCount = 10;
-      }
-      
-      // Validate and clamp panel position values
-      analysis.panels = (analysis.panels || []).map(p => ({
-        x: Math.max(5, Math.min(95, Number(p.x) || 50)),
-        y: Math.max(5, Math.min(95, Number(p.y) || 50)),
-        width: Math.max(3, Math.min(20, Number(p.width) || 8)),
-        height: Math.max(5, Math.min(30, Number(p.height) || 12))
-      }));
-      
-      // Normalize panel array to exactly panelCount entries
-      if (analysis.panels.length > analysis.panelCount) {
-        // Trim excess panels
-        analysis.panels = analysis.panels.slice(0, analysis.panelCount);
-      } else if (analysis.panels.length < analysis.panelCount) {
-        // Fill missing panels from default layout
-        const defaultLayout = createDefaultLayout(analysis.panelCount);
-        while (analysis.panels.length < analysis.panelCount) {
-          const idx = analysis.panels.length;
-          if (idx < defaultLayout.panels.length) {
-            analysis.panels.push(defaultLayout.panels[idx]);
-          }
+      if (jsonMatch) {
+        const parsed: WallAnalysis = JSON.parse(jsonMatch[0]);
+        
+        // Extract wall bounds
+        if (parsed.wallBounds) {
+          wallBounds = {
+            x: Math.max(0, Math.min(90, Number(parsed.wallBounds.x) || 15)),
+            y: Math.max(0, Math.min(90, Number(parsed.wallBounds.y) || 15)),
+            width: Math.max(20, Math.min(100, Number(parsed.wallBounds.width) || 70)),
+            height: Math.max(20, Math.min(100, Number(parsed.wallBounds.height) || 70)),
+          };
+        }
+        
+        // Determine panel count from wall size
+        if (parsed.wallSize === "small") {
+          panelCount = 3;
+        } else if (parsed.wallSize === "large") {
+          panelCount = 10;
+        } else {
+          panelCount = 5;
         }
       }
-      
     } catch (parseError) {
       console.log(`[ProcessDesign] Parse error, using defaults`);
-      analysis = createDefaultLayout(5);
     }
 
-    // Select panel set based on validated count
-    const panelSetKey = analysis.panelCount === 3 ? "small" : analysis.panelCount === 10 ? "large" : "medium";
-    const panelSet = PANEL_SETS[panelSetKey];
-    console.log(`[ProcessDesign] Using ${panelSet.name} with exactly ${analysis.panelCount} panels`);
+    // Get layout template and apply to wall bounds
+    const template = getLayoutTemplate(panelCount);
+    console.log(`[ProcessDesign] Using template: ${template.name} with ${panelCount} panels`);
 
-    // Validate panels against wall bounds
-    const wallBounds = analysis.wallBounds || { x: 10, y: 10, width: 80, height: 80 };
-    const validatedPanels: PanelPosition[] = [];
+    // Wall bounds in pixels
+    const wallLeftPx = (wallBounds.x / 100) * origWidth;
+    const wallTopPx = (wallBounds.y / 100) * origHeight;
+    const wallWidthPx = (wallBounds.width / 100) * origWidth;
+    const wallHeightPx = (wallBounds.height / 100) * origHeight;
     
-    for (const panel of analysis.panels) {
-      const wallLeft = wallBounds.x;
-      const wallRight = wallBounds.x + wallBounds.width;
-      const wallTop = wallBounds.y;
-      const wallBottom = wallBounds.y + wallBounds.height;
-      
-      const clampedX = Math.max(wallLeft + panel.width/2, Math.min(wallRight - panel.width/2, panel.x));
-      const clampedY = Math.max(wallTop + panel.height/2, Math.min(wallBottom - panel.height/2, panel.y));
-      
-      validatedPanels.push({
-        x: clampedX,
-        y: clampedY,
-        width: panel.width,
-        height: panel.height
-      });
-    }
-    
-    if (validatedPanels.length < analysis.panelCount) {
-      console.log(`[ProcessDesign] Only ${validatedPanels.length} valid panels, using default layout`);
-      const defaultLayout = createDefaultLayout(analysis.panelCount);
-      validatedPanels.length = 0;
-      validatedPanels.push(...defaultLayout.panels);
-    }
-    
-    analysis.panels = validatedPanels;
-    console.log(`[ProcessDesign] Creating ${analysis.panels.length} programmatic panels with shadows`);
+    console.log(`[ProcessDesign] Wall bounds in pixels: (${Math.round(wallLeftPx)}, ${Math.round(wallTopPx)}) ${Math.round(wallWidthPx)}x${Math.round(wallHeightPx)}`);
+    console.log(`[ProcessDesign] Creating ${template.panels.length} flat black panels`);
 
-    // Step 2: Create panel overlays with shadows programmatically
-    // Determine shadow offset based on lighting direction
-    const lightDir = analysis.lightingDirection || "above";
-    let shadowOffsetX = 0;
-    let shadowOffsetY = 4; // Default: light from above, shadow below
-    
-    if (lightDir === "left") {
-      shadowOffsetX = 4;
-      shadowOffsetY = 2;
-    } else if (lightDir === "right") {
-      shadowOffsetX = -4;
-      shadowOffsetY = 2;
-    } else if (lightDir === "diffuse") {
-      shadowOffsetX = 2;
-      shadowOffsetY = 2;
-    }
-
+    // Step 2: Create flat pure-black panel overlays (no shadows, no effects)
     const panelOverlays: sharp.OverlayOptions[] = [];
     
-    // Panel colors - dark charcoal/black for acoustic panels
-    const panelColors = [
-      { r: 35, g: 35, b: 40 },   // Near black
-      { r: 45, g: 42, b: 48 },   // Dark charcoal
-      { r: 30, g: 32, b: 35 },   // Deep gray
-      { r: 50, g: 48, b: 52 },   // Charcoal
-      { r: 38, g: 36, b: 42 },   // Dark slate
-    ];
-    
-    for (let i = 0; i < analysis.panels.length; i++) {
-      const panel = analysis.panels[i];
+    for (let i = 0; i < template.panels.length; i++) {
+      const panel = template.panels[i];
       
-      // Calculate panel dimensions in pixels
-      let panelW = Math.round((panel.width / 100) * origWidth);
-      let panelH = Math.round((panel.height / 100) * origHeight);
-      let panelX = Math.round((panel.x / 100) * origWidth - panelW / 2);
-      let panelY = Math.round((panel.y / 100) * origHeight - panelH / 2);
+      // Template values are percentages (0-100) within a normalized space
+      // Convert directly to pixels within wall bounds
+      const panelCenterX = wallLeftPx + (panel.x / 100) * wallWidthPx;
+      const panelCenterY = wallTopPx + (panel.y / 100) * wallHeightPx;
+      let panelW = Math.round((panel.width / 100) * wallWidthPx);
+      let panelH = Math.round((panel.height / 100) * wallHeightPx);
+      let panelX = Math.round(panelCenterX - panelW / 2);
+      let panelY = Math.round(panelCenterY - panelH / 2);
       
-      // Clamp panel to stay within image bounds (instead of skipping)
+      // Clamp panel to stay within image bounds
       if (panelX < 0) {
         panelW += panelX;
         panelX = 0;
@@ -349,96 +272,18 @@ Guidelines:
         continue;
       }
       
-      // Scale shadow offset based on image size
-      const scaleFactor = Math.min(origWidth, origHeight) / 1000;
-      const scaledShadowX = Math.round(shadowOffsetX * scaleFactor * 2);
-      const scaledShadowY = Math.round(shadowOffsetY * scaleFactor * 2);
-      const shadowBlur = Math.max(3, Math.round(6 * scaleFactor));
-      
-      // Calculate shadow position
-      let shadowX = panelX + scaledShadowX;
-      let shadowY = panelY + scaledShadowY;
-      let shadowW = panelW + shadowBlur;
-      let shadowH = panelH + shadowBlur;
-      
-      // Clamp shadow to image bounds
-      if (shadowX < 0) {
-        shadowW += shadowX;
-        shadowX = 0;
-      }
-      if (shadowY < 0) {
-        shadowH += shadowY;
-        shadowY = 0;
-      }
-      if (shadowX + shadowW > origWidth) {
-        shadowW = origWidth - shadowX;
-      }
-      if (shadowY + shadowH > origHeight) {
-        shadowH = origHeight - shadowY;
-      }
-      
-      // Create shadow if still valid size
-      if (shadowW > 5 && shadowH > 5) {
-        const shadowBuffer = await sharp({
-          create: {
-            width: shadowW,
-            height: shadowH,
-            channels: 4,
-            background: { r: 0, g: 0, b: 0, alpha: 60 }
-          }
-        })
-          .blur(Math.max(1, Math.round(shadowBlur / 2)))
-          .png()
-          .toBuffer();
-        
-        panelOverlays.push({
-          input: shadowBuffer,
-          left: shadowX,
-          top: shadowY,
-          blend: "over" as const,
-        });
-      }
-      
-      // Select panel color (cycle through colors for variety)
-      const color = panelColors[i % panelColors.length];
-      
-      // Create the main panel rectangle with slight 3D depth effect
-      // We'll create a subtle gradient by making a slightly lighter top edge
+      // Create pure black panel rectangle - no shadows, no highlights
       const panelBuffer = await sharp({
         create: {
           width: panelW,
           height: panelH,
           channels: 4,
-          background: { r: color.r, g: color.g, b: color.b, alpha: 255 }
+          background: { r: 0, g: 0, b: 0, alpha: 255 } // Pure black
         }
       }).png().toBuffer();
-      
-      // Create a subtle highlight for the top edge (3D effect)
-      const highlightHeight = Math.max(2, Math.round(panelH * 0.03));
-      const highlightBuffer = await sharp({
-        create: {
-          width: panelW,
-          height: highlightHeight,
-          channels: 4,
-          background: { r: Math.min(255, color.r + 25), g: Math.min(255, color.g + 25), b: Math.min(255, color.b + 25), alpha: 255 }
-        }
-      }).png().toBuffer();
-      
-      // Create panel with highlight composited on top
-      const panelWithHighlight = await sharp(panelBuffer)
-        .composite([{ input: highlightBuffer, left: 0, top: 0 }])
-        .png()
-        .toBuffer();
-      
-      // Add subtle felt texture effect by adding slight noise variation
-      // (Sharp doesn't have built-in noise, but we can add a slight modulation)
-      const finalPanel = await sharp(panelWithHighlight)
-        .modulate({ brightness: 1.02 }) // Slight brightness variation
-        .png()
-        .toBuffer();
       
       panelOverlays.push({
-        input: finalPanel,
+        input: panelBuffer,
         left: panelX,
         top: panelY,
       });
@@ -448,7 +293,7 @@ Guidelines:
       throw new Error("Could not create any valid panel overlays");
     }
     
-    console.log(`[ProcessDesign] Created ${panelOverlays.length} panel overlays (including shadows)`);
+    console.log(`[ProcessDesign] Created ${panelOverlays.length} flat black panel overlays`);
 
     // Composite all panels onto the original image
     const resultBuffer = await sharp(originalBuffer)
@@ -471,43 +316,96 @@ Guidelines:
   }
 }
 
+// Layout template library - clean geometric patterns matching user examples
+const LAYOUT_TEMPLATES = {
+  // 5-panel layouts
+  verticalBars: {
+    name: "Vertical Bars",
+    count: 5,
+    panels: [
+      { x: 25, y: 35, width: 6, height: 22 },  // Tall left
+      { x: 35, y: 40, width: 6, height: 16 },  // Medium-tall
+      { x: 45, y: 38, width: 8, height: 8 },   // Square center
+      { x: 55, y: 40, width: 6, height: 16 },  // Medium-tall
+      { x: 65, y: 35, width: 6, height: 22 },  // Tall right
+    ]
+  },
+  horizontalStack: {
+    name: "Horizontal Stack",
+    count: 5,
+    panels: [
+      { x: 45, y: 25, width: 18, height: 6 },  // Top wide
+      { x: 40, y: 35, width: 22, height: 6 },  // Second wide
+      { x: 48, y: 45, width: 14, height: 6 },  // Mid narrow
+      { x: 38, y: 55, width: 26, height: 6 },  // Long bottom
+      { x: 55, y: 65, width: 12, height: 6 },  // Short bottom right
+    ]
+  },
+  mixedGeometric: {
+    name: "Mixed Geometric",
+    count: 5,
+    panels: [
+      { x: 28, y: 32, width: 6, height: 28 },  // Tall left vertical
+      { x: 45, y: 28, width: 16, height: 6 },  // Top horizontal
+      { x: 45, y: 40, width: 16, height: 6 },  // Middle horizontal
+      { x: 62, y: 32, width: 6, height: 28 },  // Tall right vertical
+      { x: 45, y: 52, width: 16, height: 6 },  // Bottom horizontal (forms E shape)
+    ]
+  },
+  // 3-panel layouts
+  threeVertical: {
+    name: "Three Vertical Bars",
+    count: 3,
+    panels: [
+      { x: 35, y: 38, width: 7, height: 24 },
+      { x: 50, y: 38, width: 7, height: 24 },
+      { x: 65, y: 38, width: 7, height: 24 },
+    ]
+  },
+  // 10-panel layouts
+  galleryGrid: {
+    name: "Gallery Grid",
+    count: 10,
+    panels: [
+      { x: 22, y: 28, width: 6, height: 20 },
+      { x: 32, y: 32, width: 6, height: 14 },
+      { x: 42, y: 28, width: 6, height: 20 },
+      { x: 52, y: 32, width: 6, height: 14 },
+      { x: 62, y: 28, width: 6, height: 20 },
+      { x: 27, y: 55, width: 6, height: 14 },
+      { x: 37, y: 52, width: 6, height: 18 },
+      { x: 47, y: 55, width: 6, height: 14 },
+      { x: 57, y: 52, width: 6, height: 18 },
+      { x: 67, y: 55, width: 6, height: 14 },
+    ]
+  },
+};
+
+// Get a layout template based on panel count
+function getLayoutTemplate(count: 3 | 5 | 10): typeof LAYOUT_TEMPLATES.verticalBars {
+  if (count === 3) {
+    return LAYOUT_TEMPLATES.threeVertical;
+  } else if (count === 10) {
+    return LAYOUT_TEMPLATES.galleryGrid;
+  } else {
+    // For 5 panels, randomly pick one of the patterns
+    const templates = [
+      LAYOUT_TEMPLATES.verticalBars,
+      LAYOUT_TEMPLATES.horizontalStack,
+      LAYOUT_TEMPLATES.mixedGeometric,
+    ];
+    return templates[Math.floor(Math.random() * templates.length)];
+  }
+}
+
 // Create a default panel layout
 function createDefaultLayout(count: 3 | 5 | 10) {
-  const panels: PanelPosition[] = [];
+  const template = getLayoutTemplate(count);
   
-  if (count === 3) {
-    panels.push(
-      { x: 35, y: 40, width: 8, height: 16 },
-      { x: 50, y: 45, width: 10, height: 10 },
-      { x: 65, y: 42, width: 9, height: 12 }
-    );
-  } else if (count === 5) {
-    panels.push(
-      { x: 30, y: 35, width: 8, height: 18 },
-      { x: 42, y: 45, width: 9, height: 9 },
-      { x: 55, y: 38, width: 10, height: 14 },
-      { x: 67, y: 48, width: 8, height: 12 },
-      { x: 78, y: 40, width: 7, height: 16 }
-    );
-  } else {
-    panels.push(
-      { x: 20, y: 30, width: 7, height: 14 },
-      { x: 30, y: 45, width: 8, height: 8 },
-      { x: 38, y: 32, width: 6, height: 12 },
-      { x: 48, y: 50, width: 9, height: 10 },
-      { x: 50, y: 35, width: 7, height: 16 },
-      { x: 60, y: 42, width: 8, height: 8 },
-      { x: 68, y: 30, width: 6, height: 14 },
-      { x: 72, y: 48, width: 7, height: 10 },
-      { x: 80, y: 36, width: 8, height: 12 },
-      { x: 85, y: 50, width: 6, height: 8 }
-    );
-  }
-
   return {
     panelCount: count,
-    wallBounds: { x: 15, y: 20, width: 70, height: 60 },
-    panels,
+    wallBounds: { x: 15, y: 15, width: 70, height: 70 },
+    panels: template.panels,
     wallColor: "white",
     lightingDirection: "above"
   };
