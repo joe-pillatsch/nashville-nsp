@@ -4,6 +4,7 @@ import type { Server } from "http";
 import { storage } from "./storage";
 import { insertDesignSchema } from "@shared/schema";
 import { openai } from "./replit_integrations/image/client";
+import { toFile } from "openai";
 import { z } from "zod";
 import multer from "multer";
 import path from "path";
@@ -437,10 +438,14 @@ Requirements:
 - Colors should complement the ${analysis.wallColor || 'existing'} wall
 - Keep ALL other elements of the room exactly as they are`;
 
+    // Convert buffers to uploadable files for OpenAI API
+    const imageFile = await toFile(resizedOriginal, "image.png", { type: "image/png" });
+    const maskFile = await toFile(maskBuffer, "mask.png", { type: "image/png" });
+
     const response = await openai.images.edit({
       model: "gpt-image-1",
-      image: resizedOriginal,
-      mask: maskBuffer,
+      image: imageFile,
+      mask: maskFile,
       prompt: editPrompt,
       n: 1,
       size: "1024x1024",
@@ -448,7 +453,7 @@ Requirements:
 
     console.log(`[ProcessDesign] Received AI edit response`);
 
-    const b64_json = response.data[0].b64_json;
+    const b64_json = response.data?.[0]?.b64_json;
     
     if (!b64_json) {
       throw new Error("No image in response");
