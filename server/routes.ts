@@ -216,22 +216,48 @@ Guidelines:
       if (!jsonMatch) throw new Error("No JSON found");
       analysis = JSON.parse(jsonMatch[0]);
       
-      // Validate and clamp values
-      analysis.panels = analysis.panels.map(p => ({
-        x: Math.max(5, Math.min(95, p.x)),
-        y: Math.max(5, Math.min(95, p.y)),
-        width: Math.max(3, Math.min(20, p.width)),
-        height: Math.max(5, Math.min(30, p.height))
+      // CRITICAL: Coerce panelCount to exactly 3, 5, or 10
+      const rawCount = Number(analysis.panelCount) || 5;
+      if (rawCount <= 3) {
+        analysis.panelCount = 3;
+      } else if (rawCount <= 7) {
+        analysis.panelCount = 5;
+      } else {
+        analysis.panelCount = 10;
+      }
+      
+      // Validate and clamp panel position values
+      analysis.panels = (analysis.panels || []).map(p => ({
+        x: Math.max(5, Math.min(95, Number(p.x) || 50)),
+        y: Math.max(5, Math.min(95, Number(p.y) || 50)),
+        width: Math.max(3, Math.min(20, Number(p.width) || 8)),
+        height: Math.max(5, Math.min(30, Number(p.height) || 12))
       }));
+      
+      // Normalize panel array to exactly panelCount entries
+      if (analysis.panels.length > analysis.panelCount) {
+        // Trim excess panels
+        analysis.panels = analysis.panels.slice(0, analysis.panelCount);
+      } else if (analysis.panels.length < analysis.panelCount) {
+        // Fill missing panels from default layout
+        const defaultLayout = createDefaultLayout(analysis.panelCount);
+        while (analysis.panels.length < analysis.panelCount) {
+          const idx = analysis.panels.length;
+          if (idx < defaultLayout.panels.length) {
+            analysis.panels.push(defaultLayout.panels[idx]);
+          }
+        }
+      }
+      
     } catch (parseError) {
       console.log(`[ProcessDesign] Parse error, using defaults`);
       analysis = createDefaultLayout(5);
     }
 
-    // Select panel set based on count
+    // Select panel set based on validated count
     const panelSetKey = analysis.panelCount === 3 ? "small" : analysis.panelCount === 10 ? "large" : "medium";
     const panelSet = PANEL_SETS[panelSetKey];
-    console.log(`[ProcessDesign] Using ${panelSet.name}`);
+    console.log(`[ProcessDesign] Using ${panelSet.name} with exactly ${analysis.panelCount} panels`);
 
     // Step 2: Create square 1024x1024 images for gpt-image-1 edit
     // Letterbox the original image to preserve aspect ratio within the square
