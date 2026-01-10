@@ -10,11 +10,26 @@ import path from "path";
 import fs from "fs";
 import sharp from "sharp";
 
-// Panel set configurations
+// Panel set configurations with detailed descriptions for AI
 const PANEL_SETS = {
-  small: { file: "panels-3.png", name: "Set of 3" },
-  medium: { file: "panels-5.png", name: "Set of 5" },
-  large: { file: "panels-10.png", name: "Set of 10" },
+  small: { 
+    file: "panels-3.png", 
+    name: "Set of 3",
+    count: 3,
+    description: "3 acoustic felt panels: one large vertical rectangle (about 2ft tall x 1ft wide), one medium square (1ft x 1ft), and one small horizontal rectangle (1ft wide x 0.5ft tall). Modern minimalist design in warm earth tones - terracotta, sage green, and cream."
+  },
+  medium: { 
+    file: "panels-5.png", 
+    name: "Set of 5",
+    count: 5,
+    description: "5 acoustic felt panels in varying sizes: two large vertical rectangles (2ft x 1ft), two medium squares (1ft x 1ft), and one horizontal rectangle (1.5ft x 0.75ft). Coordinated color palette with muted natural tones - olive, rust, beige, charcoal, and warm white."
+  },
+  large: { 
+    file: "panels-10.png", 
+    name: "Set of 10",
+    count: 10,
+    description: "10 acoustic felt panels creating a gallery wall effect: mix of vertical rectangles, horizontal rectangles, and squares in various sizes (ranging from 0.5ft to 2ft). Rich color palette including deep burgundy, forest green, navy, terracotta, cream, and natural wood tones."
+  },
 };
 
 // Configure multer for file uploads
@@ -109,9 +124,28 @@ async function processDesign(designId: number, imageUrl: string, prompt: string)
     console.log(`[ProcessDesign] Starting processing for design ${designId}`);
     await storage.updateDesignStatus(designId, "processing");
 
-    // Step 1: Analyze the wall using GPT-4 Vision to determine size and get placement info
-    console.log(`[ProcessDesign] Analyzing wall with GPT-4 Vision...`);
+    // Convert base64 data URL to buffer for processing
+    const base64Data = imageUrl.replace(/^data:image\/\w+;base64,/, "");
+    const originalBuffer = Buffer.from(base64Data, "base64");
     
+    // Get original image dimensions
+    const originalMeta = await sharp(originalBuffer).metadata();
+    const origWidth = originalMeta.width || 1024;
+    const origHeight = originalMeta.height || 1024;
+    console.log(`[ProcessDesign] Original image size: ${origWidth}x${origHeight}`);
+
+    // Step 1: Analyze wall and get creative layout recommendations from GPT-4o Vision
+    console.log(`[ProcessDesign] Analyzing wall with GPT-4o Vision...`);
+    
+    // Load panel set images for vision analysis
+    const panel3Path = path.join(process.cwd(), "client", "public", "panels-3.png");
+    const panel5Path = path.join(process.cwd(), "client", "public", "panels-5.png");
+    const panel10Path = path.join(process.cwd(), "client", "public", "panels-10.png");
+    
+    const panel3Base64 = fs.readFileSync(panel3Path).toString("base64");
+    const panel5Base64 = fs.readFileSync(panel5Path).toString("base64");
+    const panel10Base64 = fs.readFileSync(panel10Path).toString("base64");
+
     const analysisResponse = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
@@ -120,102 +154,144 @@ async function processDesign(designId: number, imageUrl: string, prompt: string)
           content: [
             {
               type: "text",
-              text: `Analyze this room image. I need to place acoustic sound panels on the main visible wall.
-              
-Please respond with JSON only in this format:
-{
-  "wallSize": "small" | "medium" | "large",
-  "wallBounds": {
-    "x": number (0-100, percentage from left),
-    "y": number (0-100, percentage from top),
-    "width": number (0-100, percentage of image width),
-    "height": number (0-100, percentage of image height)
-  },
-  "confidence": number (0-1)
-}
+              text: `You are an interior design expert. I'm showing you:
+1. A room photo with a wall where I want to hang acoustic sound panels
+2. Three reference images showing acoustic panel sets (3, 5, and 10 panels)
 
-Guidelines:
-- "small" = wall area less than 30% of image, use 3 panels
-- "medium" = wall area 30-50% of image, use 5 panels
-- "large" = wall area greater than 50% of image, use 10 panels
-- wallBounds should define where the blank wall area is located`
+Analyze the room and determine:
+1. Which panel set (3, 5, or 10) is most appropriate based on the wall size
+2. A creative, aesthetically pleasing arrangement for the individual panels on the wall
+
+The panels in the reference images are approximately 1-foot wide felt acoustic panels in various shapes (rectangles and squares) and colors.
+
+Respond with JSON only:
+{
+  "panelCount": 3 | 5 | 10,
+  "layoutDescription": "A detailed description of how to arrange the panels on the wall, including relative positions, spacing, and artistic considerations like asymmetric balance, visual flow, etc.",
+  "wallColor": "The approximate color of the wall",
+  "roomStyle": "The overall style of the room (modern, traditional, minimalist, etc.)",
+  "confidence": 0-1
+}`
             },
             {
               type: "image_url",
-              image_url: { url: imageUrl }
+              image_url: { url: imageUrl, detail: "high" }
+            },
+            {
+              type: "text",
+              text: "Panel Set 1 - 3 panels:"
+            },
+            {
+              type: "image_url",
+              image_url: { url: `data:image/png;base64,${panel3Base64}`, detail: "low" }
+            },
+            {
+              type: "text",
+              text: "Panel Set 2 - 5 panels:"
+            },
+            {
+              type: "image_url",
+              image_url: { url: `data:image/png;base64,${panel5Base64}`, detail: "low" }
+            },
+            {
+              type: "text",
+              text: "Panel Set 3 - 10 panels:"
+            },
+            {
+              type: "image_url",
+              image_url: { url: `data:image/png;base64,${panel10Base64}`, detail: "low" }
             }
           ]
         }
       ],
-      max_tokens: 500,
+      max_tokens: 1000,
     });
 
     const analysisText = analysisResponse.choices[0]?.message?.content || "";
     console.log(`[ProcessDesign] Wall analysis result: ${analysisText}`);
 
-    // Parse the JSON response
-    let wallAnalysis: { 
-      wallSize: "small" | "medium" | "large";
-      wallBounds: { x: number; y: number; width: number; height: number };
+    // Parse the analysis
+    let analysis: { 
+      panelCount: 3 | 5 | 10;
+      layoutDescription: string;
+      wallColor: string;
+      roomStyle: string;
     };
     
     try {
-      // Extract JSON from the response (handle markdown code blocks)
       const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
       if (!jsonMatch) throw new Error("No JSON found in response");
-      wallAnalysis = JSON.parse(jsonMatch[0]);
+      analysis = JSON.parse(jsonMatch[0]);
     } catch (parseError) {
-      console.log(`[ProcessDesign] Could not parse analysis, defaulting to medium`);
-      wallAnalysis = { 
-        wallSize: "medium", 
-        wallBounds: { x: 20, y: 20, width: 60, height: 60 } 
+      console.log(`[ProcessDesign] Could not parse analysis, defaulting to 5 panels`);
+      analysis = { 
+        panelCount: 5, 
+        layoutDescription: "Arrange panels in an asymmetric gallery-style layout centered on the wall",
+        wallColor: "white",
+        roomStyle: "modern"
       };
     }
 
-    // Step 2: Select the appropriate panel set
-    const panelSet = PANEL_SETS[wallAnalysis.wallSize];
-    console.log(`[ProcessDesign] Selected panel set: ${panelSet.name} for ${wallAnalysis.wallSize} wall`);
+    // Select the appropriate panel set
+    const panelSetKey = analysis.panelCount === 3 ? "small" : analysis.panelCount === 10 ? "large" : "medium";
+    const panelSet = PANEL_SETS[panelSetKey];
+    console.log(`[ProcessDesign] Selected: ${panelSet.name} for ${analysis.roomStyle} room`);
 
-    // Step 3: Composite the panels onto the original image using sharp
-    const panelPath = path.join(process.cwd(), "client", "public", panelSet.file);
+    // Step 2: Use gpt-image-1 to edit the image and add panels realistically
+    console.log(`[ProcessDesign] Generating photorealistic panel arrangement...`);
+
+    // Get the panel reference image
+    const panelRefPath = path.join(process.cwd(), "client", "public", panelSet.file);
+    const panelRefBuffer = fs.readFileSync(panelRefPath);
     
-    // Convert base64 data URL to buffer
-    const base64Data = imageUrl.replace(/^data:image\/\w+;base64,/, "");
-    const originalBuffer = Buffer.from(base64Data, "base64");
-    
-    // Get original image dimensions
-    const originalMeta = await sharp(originalBuffer).metadata();
-    const origWidth = originalMeta.width || 1024;
-    const origHeight = originalMeta.height || 1024;
+    // Create an edit prompt that describes exactly what we want
+    const editPrompt = `Edit this room photo to add ${panelSet.count} acoustic felt sound panels hanging on the main wall. 
 
-    // Calculate panel overlay position and size based on wall bounds
-    const overlayX = Math.round((wallAnalysis.wallBounds.x / 100) * origWidth);
-    const overlayY = Math.round((wallAnalysis.wallBounds.y / 100) * origHeight);
-    const overlayWidth = Math.round((wallAnalysis.wallBounds.width / 100) * origWidth);
-    const overlayHeight = Math.round((wallAnalysis.wallBounds.height / 100) * origHeight);
+Panel Details: ${panelSet.description}
 
-    // Resize the panel overlay to fit the wall area
-    const panelBuffer = await sharp(panelPath)
-      .resize(overlayWidth, overlayHeight, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
-      .toBuffer();
+Layout Guidance: ${analysis.layoutDescription}
 
-    // Composite the panels onto the original image
-    const compositeBuffer = await sharp(originalBuffer)
-      .composite([
-        {
-          input: panelBuffer,
-          left: overlayX,
-          top: overlayY,
-        }
-      ])
+IMPORTANT REQUIREMENTS:
+- The panels must look like they are ACTUALLY HANGING on the wall with proper perspective
+- Add subtle shadows beneath each panel to make them look 3D and realistic
+- The panels should have a soft felt/fabric texture
+- Maintain proper scale - each panel is approximately 1 foot wide
+- Match the lighting and color temperature of the room
+- Keep all other elements of the room EXACTLY as they are
+- The arrangement should be aesthetically pleasing with intentional asymmetric balance
+- Panels should be spaced appropriately, not touching each other
+
+Room context: ${analysis.roomStyle} style room with ${analysis.wallColor} walls.`;
+
+    console.log(`[ProcessDesign] Edit prompt: ${editPrompt.substring(0, 200)}...`);
+
+    // Resize image to supported dimensions for gpt-image-1 (max 1024x1024 for square)
+    const resizedBuffer = await sharp(originalBuffer)
+      .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
       .png()
       .toBuffer();
 
-    const resultBase64 = compositeBuffer.toString("base64");
-    const resultUrl = `data:image/png;base64,${resultBase64}`;
+    const response = await openai.images.edit({
+      model: "gpt-image-1",
+      image: resizedBuffer,
+      prompt: editPrompt,
+      n: 1,
+      size: "1024x1024",
+    });
 
-    console.log(`[ProcessDesign] Successfully composited panels for design ${designId}`);
-    await storage.updateDesignStatus(designId, "completed", resultUrl);
+    console.log(`[ProcessDesign] Received response from OpenAI image edit`);
+
+    // Get the result
+    const b64_json = response.data[0].b64_json;
+    const generatedUrl = b64_json ? `data:image/png;base64,${b64_json}` : response.data[0].url;
+
+    if (generatedUrl) {
+      console.log(`[ProcessDesign] Successfully generated panel arrangement for design ${designId}`);
+      await storage.updateDesignStatus(designId, "completed", generatedUrl);
+    } else {
+      console.error(`[ProcessDesign] No image in response for design ${designId}`);
+      await storage.updateDesignStatus(designId, "failed");
+    }
 
   } catch (error) {
     console.error(`[ProcessDesign] Error processing design ${designId}:`, error);
