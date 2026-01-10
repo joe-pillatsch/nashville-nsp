@@ -316,85 +316,69 @@ Guidelines:
   }
 }
 
-// Layout template library - clean geometric patterns matching user examples
+// Layout template library - matches the actual "Set of 5" panel proportions
+// Panels are 1ft wide x varying heights (4ft, 4ft, 2.5ft, 2.5ft, 1.5ft)
+// Ratio approximately 1:4 for tallest panels
 const LAYOUT_TEMPLATES = {
-  // 5-panel layouts
-  verticalBars: {
-    name: "Vertical Bars",
+  // 5-panel layout matching the "Set of 5" reference image
+  // Panels arranged left to right: tall, tall, medium, medium, short
+  // All panels bottom-aligned at roughly the same baseline
+  setOfFive: {
+    name: "Set of 5",
     count: 5,
     panels: [
-      { x: 25, y: 35, width: 6, height: 22 },  // Tall left
-      { x: 35, y: 40, width: 6, height: 16 },  // Medium-tall
-      { x: 45, y: 38, width: 8, height: 8 },   // Square center
-      { x: 55, y: 40, width: 6, height: 16 },  // Medium-tall
-      { x: 65, y: 35, width: 6, height: 22 },  // Tall right
+      // Panel 1 (leftmost): 4 feet tall - width 10%, height 50%
+      { x: 18, y: 50, width: 10, height: 50 },
+      // Panel 2: 4 feet tall
+      { x: 34, y: 50, width: 10, height: 50 },
+      // Panel 3 (center): ~2.5 feet tall - shorter
+      { x: 50, y: 56, width: 10, height: 38 },
+      // Panel 4: ~2.5 feet tall
+      { x: 66, y: 53, width: 10, height: 44 },
+      // Panel 5 (rightmost): ~1.5 feet tall - shortest
+      { x: 82, y: 62, width: 10, height: 26 },
     ]
   },
-  horizontalStack: {
-    name: "Horizontal Stack",
-    count: 5,
-    panels: [
-      { x: 45, y: 25, width: 18, height: 6 },  // Top wide
-      { x: 40, y: 35, width: 22, height: 6 },  // Second wide
-      { x: 48, y: 45, width: 14, height: 6 },  // Mid narrow
-      { x: 38, y: 55, width: 26, height: 6 },  // Long bottom
-      { x: 55, y: 65, width: 12, height: 6 },  // Short bottom right
-    ]
-  },
-  mixedGeometric: {
-    name: "Mixed Geometric",
-    count: 5,
-    panels: [
-      { x: 28, y: 32, width: 6, height: 28 },  // Tall left vertical
-      { x: 45, y: 28, width: 16, height: 6 },  // Top horizontal
-      { x: 45, y: 40, width: 16, height: 6 },  // Middle horizontal
-      { x: 62, y: 32, width: 6, height: 28 },  // Tall right vertical
-      { x: 45, y: 52, width: 16, height: 6 },  // Bottom horizontal (forms E shape)
-    ]
-  },
-  // 3-panel layouts
+  // 3-panel layouts - also using tall vertical proportions
   threeVertical: {
     name: "Three Vertical Bars",
     count: 3,
     panels: [
-      { x: 35, y: 38, width: 7, height: 24 },
-      { x: 50, y: 38, width: 7, height: 24 },
-      { x: 65, y: 38, width: 7, height: 24 },
+      { x: 30, y: 50, width: 10, height: 50 },
+      { x: 50, y: 50, width: 10, height: 50 },
+      { x: 70, y: 50, width: 10, height: 50 },
     ]
   },
-  // 10-panel layouts
+  // 10-panel layouts - two rows of tall panels
   galleryGrid: {
     name: "Gallery Grid",
     count: 10,
     panels: [
-      { x: 22, y: 28, width: 6, height: 20 },
-      { x: 32, y: 32, width: 6, height: 14 },
-      { x: 42, y: 28, width: 6, height: 20 },
-      { x: 52, y: 32, width: 6, height: 14 },
-      { x: 62, y: 28, width: 6, height: 20 },
-      { x: 27, y: 55, width: 6, height: 14 },
-      { x: 37, y: 52, width: 6, height: 18 },
-      { x: 47, y: 55, width: 6, height: 14 },
-      { x: 57, y: 52, width: 6, height: 18 },
-      { x: 67, y: 55, width: 6, height: 14 },
+      // Top row - 5 panels
+      { x: 18, y: 30, width: 8, height: 35 },
+      { x: 34, y: 30, width: 8, height: 35 },
+      { x: 50, y: 30, width: 8, height: 35 },
+      { x: 66, y: 30, width: 8, height: 35 },
+      { x: 82, y: 30, width: 8, height: 35 },
+      // Bottom row - 5 panels
+      { x: 18, y: 75, width: 8, height: 35 },
+      { x: 34, y: 75, width: 8, height: 35 },
+      { x: 50, y: 75, width: 8, height: 35 },
+      { x: 66, y: 75, width: 8, height: 35 },
+      { x: 82, y: 75, width: 8, height: 35 },
     ]
   },
 };
 
 // Get a layout template based on panel count
-function getLayoutTemplate(count: 3 | 5 | 10): typeof LAYOUT_TEMPLATES.verticalBars {
+function getLayoutTemplate(count: 3 | 5 | 10): typeof LAYOUT_TEMPLATES.setOfFive {
   if (count === 3) {
     return LAYOUT_TEMPLATES.threeVertical;
   } else if (count === 10) {
     return LAYOUT_TEMPLATES.galleryGrid;
   } else {
-    // For 5 panels, randomly pick one of the patterns
-    const templates = [
-      LAYOUT_TEMPLATES.verticalBars,
-      LAYOUT_TEMPLATES.horizontalStack,
-      LAYOUT_TEMPLATES.mixedGeometric,
-    ];
-    return templates[Math.floor(Math.random() * templates.length)];
+    // Use the "Set of 5" pattern matching the reference image
+    return LAYOUT_TEMPLATES.setOfFive;
   }
 }
 
